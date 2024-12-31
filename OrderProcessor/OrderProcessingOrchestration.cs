@@ -5,6 +5,8 @@ using Microsoft.DurableTask.Client;
 using Microsoft.Extensions.Logging;
 using Company.Function.Models;
 using Company.Function.Activities;
+using System.Net;
+using System.Text.Json;
 
 
 namespace Company.Function
@@ -65,19 +67,46 @@ namespace Company.Function
 
         [Function("OrderProcessingOrchestration_HttpStart")]
         public static async Task<HttpResponseData> HttpStart(
-            [HttpTrigger(AuthorizationLevel.Anonymous, "get", "post")] HttpRequestData req,
-            [DurableClient] DurableTaskClient client,
-            FunctionContext executionContext)
+    [HttpTrigger(AuthorizationLevel.Anonymous, "get", "post")] HttpRequestData req,
+    [DurableClient] DurableTaskClient client,
+    FunctionContext executionContext)
         {
             ILogger logger = executionContext.GetLogger("OrderProcessingOrchestration_HttpStart");
+            HttpResponseData response;
 
-            // Mimic a new order being placed to start order processing orchestration
-            string instanceId = await client.ScheduleNewOrchestrationInstanceAsync(
-                nameof(OrderProcessingOrchestration), new OrderPayload("milk", TotalCost: 5, Quantity: 1));
+            try
+            {
+                // Parse and validate the request payload
+                var requestBody = await req.ReadAsStringAsync();
+                var order = JsonSerializer.Deserialize<OrderPayload>(requestBody);
+                if (order == null || string.IsNullOrWhiteSpace(order.Name) || order.Quantity <= 0 || order.TotalCost <= 0)
+                {
+                    response = req.CreateResponse(HttpStatusCode.BadRequest);
+                    await response.WriteStringAsync("Invalid order payload. Please provide valid order details.");
+                    return response;
+                }
 
-            logger.LogInformation("Started orchestration with ID = '{instanceId}'.", instanceId);
+                // Start the orchestration
+                string instanceId = await client.ScheduleNewOrchestrationInstanceAsync(
+                    nameof(OrderProcessingOrchestration), order);
 
-            return await client.CreateCheckStatusResponseAsync(req, instanceId);
+                logger.LogInformation("Started orchestration with ID = '{instanceId}'.", instanceId);
+
+                // Create a status-check response
+                response = await client.CreateCheckStatusResponseAsync(req, instanceId);
+
+                // Optional: Add custom message or details to the response
+                await response.WriteStringAsync($"Order processing initiated. Instance ID: {instanceId}");
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Failed to start order processing orchestration.");
+                response = req.CreateResponse(HttpStatusCode.InternalServerError);
+                await response.WriteStringAsync("An error occurred while starting the orchestration.");
+            }
+
+            return response;
         }
+
     }
 }
